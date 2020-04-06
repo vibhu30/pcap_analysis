@@ -1,0 +1,226 @@
+#%matplotlib inline
+import datetime
+import sys, os, subprocess
+import numpy as np
+#import matplotlib.pyplot as plt
+import pandas as pd
+from pandas.io.json import json_normalize
+from statistics import mean
+from pprint import pprint
+from collections import defaultdict
+import pymongo
+
+import warnings
+#warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore")
+
+
+#MongoDB connection
+myclient = pymongo.MongoClient("mongodb://localhost:27017/")
+mydb = myclient["performance"]
+
+path = ""
+test_id = ""
+test_date_time = ""
+latitude = ""
+longitude = ""
+
+def initiate_data(path, test_id, test_date_time, latitude, longitude):
+    try:
+        path = path
+        test_id = test_id
+        test_date_time = pd.to_datetime(test_date_time)
+        with open(path) as f:
+            df = pd.read_csv(f, sep="|", low_memory=False)
+
+        #df = pd.read_csv("C:/map/AquaMark/pcap_analysis/tshark_PDML/mozark_pcap_analysis-master/logs/hotstar1.log", sep="|", low_memory=False)
+        
+        # filter the unwanted data to get the accurate ESNIs
+        df = df[(df["frame.protocols"] != "sll:ethertype:ipv6:udp:mdns") & (df["frame.protocols"] != "sll:ethertype:ip:udp:mdns") & \
+                (df["frame.protocols"] != "sll:ethertype:ip:udp:nbns") & (df["frame.protocols"] != "sll:ethertype:arp") & \
+                (df["frame.protocols"] != "sll:ethertype:ipv6:udp:ssdp") & (df["frame.protocols"] != "sll:ethertype:ip:igmp:igmp:vssmonitoring") & \
+                (df["frame.protocols"] != "sll:ethertype:ipv6:ipv6.hopopts:icmpv6") & \
+                (df["frame.protocols"] != "sll:ethertype:ipv6:udp:llmnr") & \
+                (df["frame.protocols"] != "sll:ethertype:ip:udp:nbdgm:smb:browser") & \
+                (df["frame.protocols"] != "sll:ethertype:ipv6:udp:dhcpv6") & \
+                (df["frame.protocols"] != "sll:ethertype:ip:udp:db-lsp-disc:json") & (df["frame.protocols"] != "sll:ethertype:data") & \
+                (df["frame.protocols"] != "sll:ethertype:ip:igmp:igmp") & (df["frame.protocols"] != "sll:ethertype:ip:udp:ssdp") & \
+                (df["frame.protocols"] != "sll:ethertype:ipv6:icmpv6") & (df["frame.protocols"] != "sll:ethertype:ip:udp:llmnr") & \
+                (df["frame.protocols"] != "sll:ethertype:arp:vssmonitoring") & \
+                (df["frame.protocols"] != "sll:ethertype:ip:udp:udpencap:esp") & \
+                (df["frame.protocols"] != "sll:ethertype:ip:udp:teredo:ipv6") & \
+                (df["frame.protocols"] != "sll:ethertype:ip:tcp:vssmonitoring") & \
+                (df["ip.dst"] != "239.255.255.250") & (df["ip.dst"] != "224.0.0.251") & (df["ip.dst"] != "239.255.255.250") & \
+                (df["ip.dst"] != "255.255.255.255") & (df["ip.dst"] != "192.168.1.255")].copy()
+        
+        # parse datatime
+        df["frame.time"] = pd.to_datetime(df["frame.time"])
+
+        other_col_names = [
+            'frame.number', 'ip.version', 'ip.proto', 'ip.src', 'ip.dst', 'ip.flags'
+        ]
+
+        tcp_col_names = [ 'frame.time', 'frame.time_relative',
+            'tcp.stream', 'tcp.srcport', 'tcp.dstport', 'tcp.flags', 'tcp.time_relative',
+            'tls.record.content_type', 'tls.handshake.type', 'tls.alert_message',
+            'tls.handshake.cert_type.type', 'tls.handshake.extensions_server_name',
+            'tls.handshake.extensions_alpn_str',
+            'http.response.code', 'http.request.full_uri', 'http.request.uri', 'http.time'
+        ]
+
+        udp_col_names = [ 'frame.time', 'frame.time_relative',
+            'udp.stream', 'udp.dstport', 'udp.srcport',
+            'dns.flags', 'dns.time', 'dns.count.queries', 'dns.qry.name', 'dns.resp.ttl'
+        ]
+
+        df['server'] = np.where(df['tls.handshake.extensions_server_name'].notnull(), df['tls.handshake.extensions_server_name'], \
+                                 np.where(df['dns.qry.name'].notnull(), df['dns.qry.name'], df['http.request.full_uri']))
+
+
+
+        #Clean Data
+
+        # convert tls.record.content_type into one value
+        for indx_num in df.index:
+            for col_name in ["tls.record.content_type"]:
+                if(df.loc[indx_num, col_name] == df.loc[indx_num, col_name]):
+                    df.loc[indx_num, col_name] = int(str(df.loc[indx_num, col_name]).split(',')[0])
+
+        for indx_num in df.index:
+            for col_name in ["tls.handshake.type"]:
+                if(df.loc[indx_num, col_name] == df.loc[indx_num, col_name]):
+                    df.loc[indx_num, col_name] = float(str(df.loc[indx_num, col_name]).split(',')[0])
+
+
+        df_weird_packets = df[ (df['ip.version']=='4,4') | (df['ip.version']=='6,6') | (df['ip.version']=='4,6') | (df['ip.version']=='6,4')]
+        #print("Number of such packets with ICMP and UDP/DNS = ", len(df_weird_packets))
+
+        for indx_num in df_weird_packets.index:
+            for col_name in ["ip.version", "ip.proto", "ip.src", "ip.dst", "ip.flags", "ip.frag_offset", "ip.ttl", "ip.len"]:
+                df[col_name] = df[col_name].astype(str)
+                df.loc[indx_num, col_name] = df.loc[indx_num, col_name].split(",")[-1]
+                #df.loc[indx_num, "tls.record.content_type"]
+
+        #df['tls.record.content_type'].unique()
+        df['ip.version'] = df['ip.version'].astype(float)
+        df['ip.proto'] = df['ip.proto'].astype(float)
+        df['ip.len'] = df['ip.len'].astype(float)
+
+        df_tcp = df[df["tcp.time_relative"].notnull()]
+        df_dns = df[df["dns.time"].notnull()]
+
+
+        # Average DNS Lookup Time
+        dns_time_ = df_dns.groupby(['dns.qry.name'])[['dns.time']].mean().reset_index()
+
+
+        # TLS Handshake Time | TCP Handshake Time
+        gp_tcp = df_tcp.groupby("tcp.stream")
+        tcp_dict = defaultdict(list)
+        for stream, row in gp_tcp:
+            stream_time = row.iloc[0]["frame.time"]
+            t_tcp_start, t_tls_start, tls_esni, tls_data_proto, t_data_ttfb, t_data_end, data_len = np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
+
+            # TCP handshake time start; assume first frame in stream is start of stream
+            t_tcp_start = row.iloc[0]["frame.time_relative"]
+
+            if len(row.loc[row["tls.handshake.type"]==1])>0:
+                # if TLS, TCP handshake time ends when first TLS packet is generated
+                # if multiple HELLOs, we end up using the first one, but this shouldn't really happen in a single tcp.stream
+
+                # first CLIENT HELLO packet should contain server name and protocol
+                tls_client_hello_packet = row.loc[row["tls.handshake.type"]==1].iloc[0]
+                t_tls_start = tls_client_hello_packet["frame.time_relative"]
+
+                # Extract the server name and the DATA protocol (usually http/1.1) from TLS CLIENT HELLO PACKET
+                tls_esni = tls_client_hello_packet["tls.handshake.extensions_server_name"]
+                tls_data_proto = tls_client_hello_packet["tls.handshake.extensions_alpn_str"]
+
+                if len(row.loc[row["tls.record.content_type"]==23])>0:
+                    #print("yes")
+                    # if TLS has actual DATA, find the time taken for the complete DATA block
+                    # TODO: Special Case of multiple DATA blocks in the same stream with large gaps in the middle.
+                    data_block = row.loc[row["tls.record.content_type"]==23]
+                    t_data_ttfb = data_block.iloc[0]["frame.time_relative"]
+                    t_data_end = data_block.iloc[-1]["frame.time_relative"]
+                    data_len = data_block["frame.len"].sum()
+
+                    num_pkts = len(row.iloc[data_block.index[0]:data_block.index[-1]])
+                    if len(data_block) < num_pkts:
+                        pass
+                        #print("Number of extra packets in stream %d: (%d - %d) = %d" %(stream, num_pkts, len(data_block), num_pkts-len(data_block)))
+
+                else:
+                    pass
+
+            else: 
+                # should be only TCP (maybe with a TLS Encrypted Alert to end the connection)
+                if len(row[~row["http.response.code"].isnull()])>0:
+                    # check for HTTP
+                    tls_esni = row[~row["http.response.code"].isnull()].iloc[0]["server"]
+                    data_len = row[~row["http.response.code"].isnull()]["frame.len"].sum()
+                    t_data_ttfb = row[~row["http.response.code"].isnull()].iloc[0]["frame.time_relative"]
+                    t_data_end = row[~row["http.response.code"].isnull()].iloc[-1]["frame.time_relative"]
+                else:
+                    # if no HTTP but there was only TCP signalling with no real data => don't count in waterfall
+                    # there may be a TLS encrypted alert - should not count in waterfall
+                    pass
+
+            # update with values or nan as needed
+            #tcp_dict["tcp.len"].append(stream_time)
+            tcp_dict["frame.time"].append(stream_time)
+
+            tcp_dict["tcp.stream"].append(stream)
+            tcp_dict["server"].append(tls_esni)
+            tcp_dict["tls_data_proto"].append(tls_data_proto)
+
+            tcp_dict["t_tcp_start"].append(t_tcp_start)
+            tcp_dict["t_tls_start"].append(t_tls_start)
+            tcp_dict["tcp_handshake_time"].append(t_tls_start-t_tcp_start)
+            tcp_dict["t_data_ttfb"].append(t_data_ttfb)
+            tcp_dict["tls_handshake_time"].append(t_data_ttfb-t_tls_start)
+            tcp_dict["t_data_end"].append(t_data_end)
+            tcp_dict["data_exchange_time"].append(t_data_end-t_data_ttfb)
+            tcp_dict["data_exchange_len"].append(data_len)
+            if(t_data_end-t_data_ttfb > 0):
+                tcp_dict["data_exchange_rate"].append(data_len/(t_data_end-t_data_ttfb))
+            else:
+                tcp_dict["data_exchange_rate"].append(np.nan)
+
+
+        df_tcp_time = pd.DataFrame(tcp_dict)
+
+        #calculate dns time
+        #df_dns_time = df_dns[["dns.qry.name", "frame.time_relative", "frame.time", "dns.time"]].copy()
+        df_dns_time = df_dns[["server", "frame.time_relative", "frame.time", "dns.time"]].copy()
+        df_dns_time["t_dns_start"] = df_dns_time["frame.time_relative"] - df_dns_time["dns.time"]
+        df_dns_time.rename(columns={"frame.time_relative":"t_dns_end","dns.time": "dns_query_time","server": "server"}, inplace=True)        
+
+        df_tcp_time['server'] = df_tcp_time['server'].astype(str)
+        df_dns_time['server'] = df_dns_time['server'].astype(str)
+
+        # Merged Waterfall Data
+        df_tcp_time.sort_values("frame.time", axis = 0, ascending = True, inplace = True, na_position ='last')
+        df_dns_time.sort_values("frame.time", axis = 0, ascending = True, inplace = True, na_position ='last')
+        df_waterfall = pd.merge_asof(df_tcp_time,df_dns_time,
+                      on='frame.time', by="server",
+                      tolerance=pd.Timedelta('100ms')).sort_values(by="frame.time", ascending=False)
+
+        df_waterfall["dns_tcp_delta_time"] = df_waterfall["t_tcp_start"] - df_waterfall["t_dns_end"]
+
+        # set it to t_dns_start if it exists
+        df_waterfall["t_start"] = df_waterfall[["t_tcp_start","t_dns_start"]].min(axis=1)
+
+        #t_cap_start = df_waterfall.iloc[0]["frame.time"]
+        #df_waterfall["t_start"] = pd.to_timedelta(df_waterfall["frame.time"] - t_cap_start).dt.total_seconds()
+
+
+
+        #df_waterfall_filtered
+        df_waterfall_filtered = df_waterfall[ (df_waterfall["server"].notnull()) & (df_waterfall["server"] != "nan") ]
+
+    except:
+        print("data_cleaning failed")
+    else:
+        print("data_cleaning done")
+
